@@ -8,3 +8,4 @@ torch>=2.1.0
 Pillow>=10.0.0
 # INT8 / INT4（bitsandbytes）在 NVIDIA CUDA 环境下用于降低显存；未用量化可不装。
 bitsandbytes>=0.43.1
+mss
