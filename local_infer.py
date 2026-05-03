@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import io
 import logging
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -210,6 +211,19 @@ def get_model(cfg: MoondreamVisionConfig) -> Any:
         try:
             from transformers import AutoModelForCausalLM
         except ImportError as e:
+            chain: BaseException | None = e
+            missing_filecmp = False
+            while chain is not None:
+                if isinstance(chain, ModuleNotFoundError) and chain.name == "filecmp":
+                    missing_filecmp = True
+                    break
+                chain = chain.__cause__
+            if getattr(sys, "frozen", False) and missing_filecmp:
+                raise RuntimeError(
+                    "当前为打包 exe，主程序未包含标准库模块 filecmp（transformers 需要）。"
+                    "请用最新构建脚本重新打包主程序（已加入 PyInstaller hiddenimport filecmp），"
+                    "或使用源码/Python 解释器运行；不是 requirements.txt 未安装。"
+                ) from e
             raise RuntimeError(
                 "请安装插件依赖：pip install -r plugins/moondream_vision/requirements.txt"
             ) from e
