@@ -17,6 +17,50 @@ from plugins.moondream_vision.config_model import MoondreamVisionConfig
 logger = logging.getLogger(__name__)
 
 _moondream_hf_http_log_demoted: bool = False
+_moondream_cuda_sdp_workaround_applied: bool = False
+
+
+def _ensure_moondream_cuda_sdp_workaround() -> None:
+    """PyTorch 2.11+ CUDA 上 Flash/mem-efficient SDPA 与 Moondream 的 sdpa 路径组合曾导致 logits 异常、解码乱码。
+
+    固定使用 math 实现（通常与 2.7.x 行为更接近）。5080 等 GPU 上若仍正常可设
+    EASYAI_MOONDREAM_CUDA_SDPA_MATH_ONLY=0 关闭；或在任意版本强制开启设 =1。
+    """
+    global _moondream_cuda_sdp_workaround_applied
+
+    import torch
+
+    if not torch.cuda.is_available() or _moondream_cuda_sdp_workaround_applied:
+        return
+
+    raw = os.environ.get("EASYAI_MOONDREAM_CUDA_SDPA_MATH_ONLY", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        _moondream_cuda_sdp_workaround_applied = True
+        return
+
+    want_math = raw in ("1", "true", "yes", "on")
+    if not want_math and not raw:
+        try:
+            parts = torch.__version__.split("+")[0].split(".")
+            major, minor = int(parts[0]), int(parts[1])
+            want_math = major == 2 and minor >= 11
+        except (ValueError, IndexError):
+            want_math = False
+
+    _moondream_cuda_sdp_workaround_applied = True
+    if not want_math:
+        return
+
+    try:
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+        logger.info(
+            "Moondream: CUDA SDPA 已改用 math 内核（缓解 PyTorch 2.11+ 解码乱码）。"
+            "关闭请设 EASYAI_MOONDREAM_CUDA_SDPA_MATH_ONLY=0"
+        )
+    except Exception:
+        logger.exception("Moondream: 设置 CUDA SDPA math 后备失败")
 
 
 def _demote_hf_http_loggers_once() -> None:
@@ -147,8 +191,110 @@ def _moondream_inner(model: Any) -> Any | None:
     return None
 
 
+def _moondream_vision_sample_float_dtypes(vision: Any) -> set[Any]:
+    """抽样 vision 关键层的浮点权重 dtype；用于检测混用 float16/bfloat16/float32。"""
+    import torch
+
+    out: set[Any] = set()
+
+    def add_mod(m: Any) -> None:
+        try:
+            w = getattr(m, "weight", None)
+            if w is not None and isinstance(w, torch.Tensor):
+                d = w.dtype
+                if d in (
+                    torch.float16,
+                    torch.bfloat16,
+                    torch.float32,
+                    torch.float64,
+                ):
+                    out.add(d)
+        except Exception:
+            pass
+
+    try:
+        add_mod(vision["patch_emb"])
+    except Exception:
+        return out
+    try:
+        b0 = vision["blocks"][0]
+        for k in ("ln1", "ln2"):
+            if k in b0:
+                add_mod(b0[k])
+        add_mod(vision["post_ln"])
+    except Exception:
+        pass
+    return out
+
+
+def _unify_moondream_vision_dtype_if_needed(inner: Any) -> None:
+    """BNB / device_map 偶发使 vision 各层 dtype 不一致，首层 layer_norm 即报错，统一为 float32。"""
+    import torch
+
+    vis = getattr(inner, "vision", None)
+    if vis is None:
+        return
+    dtypes = _moondream_vision_sample_float_dtypes(vis)
+    if len(dtypes) <= 1:
+        return
+    try:
+        vis.float()
+        logger.info(
+            "Moondream: vision 内层浮点 dtype 不一致 %s，已 .float() 统一。",
+            sorted(str(d) for d in dtypes),
+        )
+    except Exception:
+        logger.exception("Moondream: vision.float() 未成功")
+
+
+def _moondream_vision_skip_prepare_crops_patch(vision: Any) -> bool:
+    """与 Hub 一致：vision 全为 bfloat16 时沿用官方 prepare_crops（bf16 归一化）。"""
+    import torch
+
+    try:
+        if vision["patch_emb"].weight.dtype != torch.bfloat16:
+            return False
+        if vision["blocks"][0]["ln1"].weight.dtype != torch.bfloat16:
+            return False
+        if vision["post_ln"].weight.dtype != torch.bfloat16:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _moondream_torch_dtype_is_float(d: Any) -> bool:
+    """仅浮点可作为 vision 激活 / crop 最终 dtype；整型（含 Char/int8、uint8）会导致 div_ 归一化报错。"""
+    import torch
+
+    try:
+        torch.finfo(d)
+        return True
+    except (TypeError, RuntimeError):
+        return False
+
+
+def _vision_prepare_cast_dtype(vision: Any) -> Any:
+    """以首层 LayerNorm 权重 dtype 为准（报错栈多在 ln1），否则回退 patch_emb / float32。"""
+    import torch
+
+    try:
+        d = vision["blocks"][0]["ln1"].weight.dtype
+        if _moondream_torch_dtype_is_float(d):
+            return d
+    except Exception:
+        pass
+    try:
+        d = vision["patch_emb"].weight.dtype
+        if _moondream_torch_dtype_is_float(d):
+            return d
+    except Exception:
+        pass
+    return torch.float32
+
+
 def _patch_moondream_prepare_crops(inner: Any) -> None:
-    """上游 prepare_crops 固定用 bfloat16；非 bf16 权重时需与 patch_emb.dtype 一致。"""
+    """上游 prepare_crops 固定用 bfloat16；其余情况按 vision 实际 dtype 输出 crop 张量。"""
     try:
         import numpy as np
         import torch
@@ -156,10 +302,10 @@ def _patch_moondream_prepare_crops(inner: Any) -> None:
     except ImportError:
         return
     try:
-        wdt = inner.vision["patch_emb"].weight.dtype
+        _ = inner.vision["patch_emb"]
     except Exception:
         return
-    if wdt == torch.bfloat16:
+    if _moondream_vision_skip_prepare_crops_patch(inner.vision):
         return
     mod_name = inner.__class__.__module__
     if not mod_name or "transformers_modules" not in mod_name:
@@ -184,15 +330,19 @@ def _patch_moondream_prepare_crops(inner: Any) -> None:
             overlap_margin=config.overlap_margin,
         )
         all_crops = overlap_crops["crops"]
-        all_crops = np.transpose(all_crops, (0, 3, 1, 2))
-        all_crops = (
-            torch.from_numpy(all_crops)
-            .to(device=device, dtype=wdt)
-            .div_(255.0)
-            .sub_(0.5)
-            .div_(0.5)
+        all_crops = np.ascontiguousarray(
+            np.transpose(all_crops, (0, 3, 1, 2))
         )
-        return all_crops, overlap_crops["tiling"]
+        # overlap_crop 多为 uint8：必须在浮点上做 div/sub，否则 .div_(255.0) 会报
+        # 「result type Float can't be cast to the desired output type Char」。
+        cast_dtype = _vision_prepare_cast_dtype(inner.vision)
+        if not _moondream_torch_dtype_is_float(cast_dtype):
+            cast_dtype = torch.float32
+        tensors = torch.from_numpy(all_crops).float().to(device=device)
+        tensors = tensors.div_(255.0).sub_(0.5).div_(0.5)
+        if tensors.dtype != cast_dtype:
+            tensors = tensors.to(dtype=cast_dtype)
+        return tensors, overlap_crops["tiling"]
 
     vision_mod.prepare_crops = prepare_crops
     # moondream.py 里 `from .vision import prepare_crops` 已拷贝函数引用，仅改 vision 模块无效。
@@ -201,7 +351,10 @@ def _patch_moondream_prepare_crops(inner: Any) -> None:
         moondream_mod.prepare_crops = prepare_crops
     except Exception as e:
         logger.warning("Moondream: 无法将 prepare_crops 同步到 moondream 模块: %s", e)
-    logger.info("Moondream: 已对齐 prepare_crops 与张量 dtype（%s）", wdt)
+    logger.info(
+        "Moondream: 已 patch prepare_crops（crop cast_dtype=%s）",
+        _vision_prepare_cast_dtype(inner.vision),
+    )
 
 
 def _bitsandbytes_quant_config(mode: str) -> Any:
@@ -279,7 +432,7 @@ def _model_load_fp_kw(
 def _model_cache_key(cfg: MoondreamVisionConfig) -> tuple[str, str, str, str, str, str]:
     q = (cfg.quantization or "none").strip().lower()
     # 与 _model_load_fp_kw 的非量化 dtype 策略一致；变更时需 bump 以丢弃旧缓存。
-    dtype_tag = "bnb_skip_vision" if q in ("int8", "int4") else "fp32_md_v4"
+    dtype_tag = "bnb_skip_vision" if q in ("int8", "int4") else "fp32_md_v6"
     return (
         (cfg.model_id or "").strip() or "vikhyatk/moondream2",
         (cfg.revision or "").strip(),
@@ -363,6 +516,7 @@ def get_model(cfg: MoondreamVisionConfig) -> Any:
             pass
         inner = _moondream_inner(_model)
         if inner is not None:
+            _unify_moondream_vision_dtype_if_needed(inner)
             _patch_moondream_prepare_crops(inner)
         else:
             logger.warning(
@@ -426,6 +580,7 @@ def _infer_screen_png_worker(
     text_q = (question or "").strip() or "Briefly describe the visible screen in English for a chat assistant."
     dev = next(model.parameters()).device
     if dev.type == "cuda":
+        _ensure_moondream_cuda_sdp_workaround()
         amp_ctx = torch.autocast(device_type="cuda", enabled=False)
     elif dev.type == "mps":
         try:
