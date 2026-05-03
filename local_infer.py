@@ -3,8 +3,10 @@ from __future__ import annotations
 import importlib
 import io
 import logging
+import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -14,6 +16,35 @@ from plugins.moondream_vision.config_model import MoondreamVisionConfig
 
 logger = logging.getLogger(__name__)
 
+_moondream_hf_http_log_demoted: bool = False
+
+
+def _demote_hf_http_loggers_once() -> None:
+    """打包/嵌入式常为 root/basicConfig=INFO，httpx 会把 Hub 每次 HEAD 都打出来；conda/IDE 下常默认更安静。"""
+    global _moondream_hf_http_log_demoted
+    if _moondream_hf_http_log_demoted:
+        return
+    if os.environ.get("EASYAI_MOONDREAM_HUB_VERBOSE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        _moondream_hf_http_log_demoted = True
+        return
+    for name in (
+        "httpx",
+        "httpcore",
+        "httpcore.http11",
+        "httpcore.connection",
+        "huggingface_hub",
+        "urllib3",
+        "urllib3.connectionpool",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    _moondream_hf_http_log_demoted = True
+
+
 _model: Any = None
 _model_key: tuple[str, str, str, str, str, str] | None = None
 _lock = threading.Lock()
@@ -21,6 +52,78 @@ _lock = threading.Lock()
 # 所有 load + infer 仅在此时上执行，避免占用 Qt 主线程或 LLMWorker 的 QThread。
 _infer_executor: ThreadPoolExecutor | None = None
 _infer_exec_lock = threading.Lock()
+
+# transformers 新版在 _finalize_model_loading 中用 ``all_tied_weights_keys``；vikhyatk/moondream2 等远端
+# ``HfMoondream`` 仍只有 Legacy ``_tied_weights_keys``，会触发 AttributeError。仅在 from_pretrained 前后打补丁。
+_compat_nn_module_attr_patch_depth = 0
+_stashed_torch_nn_module_getattr: Any | None = None
+
+
+def _legacy_tied_keys_as_mapping(legacy: Any) -> dict[str, Any]:
+    """将远端模型上的 `_tied_weights_keys` 规范为可用于 ``missing_keys - .keys()`` 的 mapping。"""
+    if isinstance(legacy, dict):
+        return legacy
+    if isinstance(legacy, (list, tuple)):
+        first = legacy[0] if legacy else None
+        if first is None:
+            return {}
+        if isinstance(first, (list, tuple)) and len(first) >= 2:
+            try:
+                return dict(legacy)
+            except (TypeError, ValueError):
+                return {}
+        if isinstance(first, str):
+            # 常见：键名列表
+            return {k: True for k in legacy if isinstance(k, str)}
+        return {}
+    return {}
+
+
+def _push_torch_module_all_tied_weights_keys_compat() -> None:
+    """支持嵌套 from_pretrained：深度为 0 时安装补丁，每层 push/pop 配对。"""
+    global _compat_nn_module_attr_patch_depth, _stashed_torch_nn_module_getattr
+
+    import torch.nn as nn
+
+    if _compat_nn_module_attr_patch_depth == 0:
+        orig = nn.Module.__getattr__
+
+        def _wrapped(self: nn.Module, name: str) -> Any:
+            if name == "all_tied_weights_keys":
+                try:
+                    return orig(self, name)
+                except AttributeError:
+                    pass
+                return _legacy_tied_keys_as_mapping(
+                    getattr(self, "_tied_weights_keys", None)
+                )
+
+            return orig(self, name)
+
+        _stashed_torch_nn_module_getattr = orig
+        nn.Module.__getattr__ = _wrapped  # type: ignore[assignment]
+
+    _compat_nn_module_attr_patch_depth += 1
+
+
+def _pop_torch_module_all_tied_weights_keys_compat() -> None:
+    global _compat_nn_module_attr_patch_depth, _stashed_torch_nn_module_getattr
+
+    import torch.nn as nn
+
+    if _compat_nn_module_attr_patch_depth <= 0:
+        return
+
+    _compat_nn_module_attr_patch_depth -= 1
+
+    if _compat_nn_module_attr_patch_depth != 0:
+        return
+
+    if _stashed_torch_nn_module_getattr is not None:
+        nn.Module.__getattr__ = _stashed_torch_nn_module_getattr  # type: ignore[assignment]
+
+    _stashed_torch_nn_module_getattr = None
+
 
 # Moondream2 的 vision 用自定义 F.linear；bitsandbytes 量化后权重为 int8，与 float 激活在 F.linear 里不兼容，须跳过量化。
 _MOONDREAM_BNB_SKIP_MODULES: tuple[str, ...] = ("vision",)
@@ -134,15 +237,15 @@ def _torch_load_kw(device: str) -> dict[str, Any]:
     # 「expected scalar type Float but found Half」。非量化路径统一用 float32 加载。
     if pref == "auto":
         if torch.cuda.is_available():
-            return {"device_map": "cuda", "torch_dtype": torch.float32}
+            return {"device_map": "cuda", "dtype": torch.float32}
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return {"device_map": "mps", "torch_dtype": torch.float32}
-        return {"device_map": {"": "cpu"}, "torch_dtype": torch.float32}
+            return {"device_map": "mps", "dtype": torch.float32}
+        return {"device_map": {"": "cpu"}, "dtype": torch.float32}
     if pref == "cuda":
-        return {"device_map": "cuda", "torch_dtype": torch.float32}
+        return {"device_map": "cuda", "dtype": torch.float32}
     if pref == "mps":
-        return {"device_map": "mps", "torch_dtype": torch.float32}
-    return {"device_map": {"": "cpu"}, "torch_dtype": torch.float32}
+        return {"device_map": "mps", "dtype": torch.float32}
+    return {"device_map": {"": "cpu"}, "dtype": torch.float32}
 
 
 def _model_load_fp_kw(
@@ -241,8 +344,13 @@ def get_model(cfg: MoondreamVisionConfig) -> Any:
         if cache_dir:
             fp_kw["cache_dir"] = cache_dir
 
+        _demote_hf_http_loggers_once()
         logger.info("Moondream 正在加载模型 %s（如需下载请稍候）…", mid)
-        _model = AutoModelForCausalLM.from_pretrained(mid, **fp_kw)
+        _push_torch_module_all_tied_weights_keys_compat()
+        try:
+            _model = AutoModelForCausalLM.from_pretrained(mid, **fp_kw)
+        finally:
+            _pop_torch_module_all_tied_weights_keys_compat()
         quant = key[4]
         if quant not in ("int8", "int4"):
             try:
@@ -263,6 +371,23 @@ def get_model(cfg: MoondreamVisionConfig) -> Any:
         _model_key = key
         logger.info("Moondream 模型已就绪。")
         return _model
+
+
+def _maybe_downscale_infer_image(
+    image: Image.Image, infer_max_side: int
+) -> Image.Image:
+    """将截图较长边限制在 infer_max_side；0 表示不缩放。"""
+    cap = int(infer_max_side)
+    if cap <= 0:
+        return image
+    w, h = image.size
+    side = max(w, h)
+    if side <= cap:
+        return image
+    scale = cap / float(side)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    return image.resize((nw, nh), Image.Resampling.LANCZOS)
 
 
 def _ensure_infer_executor() -> ThreadPoolExecutor:
@@ -286,6 +411,18 @@ def _infer_screen_png_worker(
 
     model = get_model(cfg)
     image = Image.open(io.BytesIO(png)).convert("RGB")
+    ow, oh = image.size
+    image = _maybe_downscale_infer_image(image, cfg.infer_max_side)
+    rw, rh = image.size
+    if (rw, rh) != (ow, oh):
+        logger.info(
+            "Moondream 推理前已缩放截图 %dx%d → %dx%d（infer_max_side=%d）",
+            ow,
+            oh,
+            rw,
+            rh,
+            int(cfg.infer_max_side),
+        )
     text_q = (question or "").strip() or "Briefly describe the visible screen in English for a chat assistant."
     dev = next(model.parameters()).device
     if dev.type == "cuda":
@@ -297,9 +434,38 @@ def _infer_screen_png_worker(
             amp_ctx = nullcontext()
     else:
         amp_ctx = nullcontext()
-    with torch.inference_mode():
-        with amp_ctx:
-            out = model.query(image, text_q)
+    hint = ""
+    if dev.type == "cpu":
+        # 大图 + CPU 才真正可能「很久」；你已缩到 512 边量级时十多秒很常见，勿误导为必达数分钟。
+        mp = (rw * rh) / 1_000_000.0
+        long_side = max(rw, rh)
+        if long_side <= 640 or mp <= 0.22:
+            hint = " （CPU·小图：通常在数十秒内。）"
+        elif long_side <= 1280 or mp <= 1.8:
+            hint = (
+                " （CPU·中等图：可能需要一两分钟量级；仍可尝试再「降低」推理输入最长边或使用 CUDA。）"
+            )
+        else:
+            hint = (
+                " （CPU·大图：单次 query 可达数分钟以上；请将「推理输入最长边」"
+                "调小（如 896～1280）或启用 CUDA。）"
+            )
+    logger.info(
+        "Moondream 开始 query（device=%s %s，图 %dx%d）…%s",
+        dev.type,
+        dev,
+        rw,
+        rh,
+        hint,
+    )
+    t0 = time.monotonic()
+    try:
+        with torch.inference_mode():
+            with amp_ctx:
+                out = model.query(image, text_q)
+    finally:
+        elapsed = time.monotonic() - t0
+        logger.info("Moondream query 结束，用时 %.1f s。", elapsed)
     if isinstance(out, dict):
         ans = out.get("answer")
         if isinstance(ans, str) and ans.strip():

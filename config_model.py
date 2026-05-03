@@ -20,14 +20,16 @@ class MoondreamVisionConfig:
     """none | int8 | int4。INT8/INT4 依赖 bitsandbytes，通常仅 NVIDIA CUDA 有效。"""
     motion_poll_sec: float = 0.35
     """差分/鼠标/窗口采样的时间间隔（秒）。"""
-    diff_threshold: float = 0.018
+    diff_threshold: float = 1.0
     """缩略图变化比例阈值；越大越不敏感（约 0.003~0.35）。"""
     mouse_move_percent: float = 1.1
     """鼠标相对上次采样点位移动超过「当前监视器宽高较大边」的该百分比即视为活动（0.02~25）。"""
-    interval_sec: float = 20.0
+    interval_sec: float = 30
     """满足触发条件后，两次送模型推理的最短间隔（秒）。"""
     monitor_index: int = 1
     """mss 显示器序号：1 为主屏，0 为虚拟全屏组合。"""
+    infer_max_side: int = 512
+    """送模型前将截图较长边缩到此像素；0 表示不缩放。高分辨率桌面不缩会极慢（尤其 CPU），易误以为卡死。"""
     question: str = ""
     """可选：不设分事件提示时作统一提问；设了分事件后仅当某类未填时用内置英文。"""
     question_screen_diff: str = ""
@@ -42,6 +44,7 @@ class MoondreamVisionConfig:
         self.mouse_move_percent = max(0.02, min(25.0, float(self.mouse_move_percent)))
         self.interval_sec = max(5.0, min(600.0, float(self.interval_sec)))
         self.monitor_index = max(0, min(32, int(self.monitor_index)))
+        self.infer_max_side = max(0, min(8192, int(self.infer_max_side)))
         d = (self.device or "auto").strip().lower()
         if d not in ("auto", "cuda", "mps", "cpu"):
             d = "auto"
@@ -89,6 +92,11 @@ def load_config(path: Path) -> MoondreamVisionConfig:
             mouse_move_percent=_load_mouse_move_percent(raw),
             interval_sec=float(raw.get("interval_sec", 20)),
             monitor_index=int(raw.get("monitor_index", 1)),
+            infer_max_side=int(
+                raw.get(
+                    "infer_max_side", MoondreamVisionConfig.infer_max_side
+                )
+            ),
             question=str(raw.get("question", "") or ""),
             question_screen_diff=str(
                 raw.get("question_screen_diff", MoondreamVisionConfig.question_screen_diff)

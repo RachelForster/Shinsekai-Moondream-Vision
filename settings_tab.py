@@ -52,7 +52,8 @@ class MoondreamVisionSettingsTab(QWidget):
             "请先安装插件依赖：\n，如果你要用gpu加速，请先安装和你cuda版本对应的torch和bitsandbytes，比如cuda12.4对应torch2.1.0和bitsandbytes0.43.1"
             "pip install -r plugins/moondream_vision/requirements.txt\n\n"
             "首次启用后首次推理会从网络下载模型到 HF 缓存（可填「缓存目录」重定向）。\n\n"
-            "INT8 / INT4：使用 bitsandbytes，需 NVIDIA GPU + CUDA；INT4 为 NF4 方案。比较快速但准确率下降一丢丢"
+            "INT8 / INT4：使用 bitsandbytes，需 NVIDIA GPU + CUDA；INT4 为 NF4 方案。比较快速但准确率下降一丢丢\n\n"
+            "LLM 工具 moondream_query_screen 与自动识屏共用同一模型；加载完成后若长时间无新日志，多半是在跑 query（大屏+CPU 会更久）。"
         )
         hint.setWordWrap(True)
         lay.addWidget(hint)
@@ -122,6 +123,15 @@ class MoondreamVisionSettingsTab(QWidget):
         self._monitor.setRange(0, 16)
         self._monitor.setToolTip("mss：0=所有显示器合成；1 通常为第一块物理屏")
         fl.addRow("显示器索引:", self._monitor)
+        self._infer_max_side = QSpinBox()
+        self._infer_max_side.setRange(0, 8192)
+        self._infer_max_side.setSingleStep(128)
+        self._infer_max_side.setSpecialValueText("不缩放")
+        self._infer_max_side.setToolTip(
+            "送入 Moondream 前将截图较长边缩到此像素；0=不缩放。\n"
+            "4K 全屏不缩在 CPU 上可能单次 query 需数分钟；默认 1280 可明显加速。"
+        )
+        fl.addRow("推理输入最长边 (px):", self._infer_max_side)
 
         pq = QGroupBox("英文提示词（按触发类型，可留空用内置）")
         pql = QFormLayout(pq)
@@ -197,6 +207,7 @@ class MoondreamVisionSettingsTab(QWidget):
         self._mouse_pct.setValue(c.mouse_move_percent)
         self._interval.setValue(c.interval_sec)
         self._monitor.setValue(c.monitor_index)
+        self._infer_max_side.setValue(c.infer_max_side)
         self._q_screen_diff.setPlainText(c.question_screen_diff)
         self._q_foreground.setPlainText(c.question_foreground)
         self._q_new_window.setPlainText(c.question_new_window)
@@ -217,6 +228,7 @@ class MoondreamVisionSettingsTab(QWidget):
             mouse_move_percent=float(self._mouse_pct.value()),
             interval_sec=float(self._interval.value()),
             monitor_index=int(self._monitor.value()),
+            infer_max_side=int(self._infer_max_side.value()),
             question=self._question.toPlainText().strip(),
             question_screen_diff=self._q_screen_diff.toPlainText().strip(),
             question_foreground=self._q_foreground.toPlainText().strip(),
