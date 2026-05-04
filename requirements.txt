@@ -9,7 +9,8 @@
 #
 # 若暂时只能用 torch 2.11+：插件会尝试在 CUDA 上强制 SDPA math 内核；仍异常可设 EASYAI_MOONDREAM_CUDA_SDPA_MATH_ONLY=1，
 # 不需要规避时设 EASYAI_MOONDREAM_CUDA_SDPA_MATH_ONLY=0。
-transformers>=4.51.1
+# transformers 5.x（如 5.7）与本仓库使用的 vikhyatk/moondream2 + trust_remote_code 组合会导致 query 解码乱码；请保持 4.x。
+transformers>=4.51.1,<5
 accelerate>=1.10.0
 # 已由上一行单独安装 torch 时，勿用 pip -U 盲目升级 torch。
 torch>=2.1.0
