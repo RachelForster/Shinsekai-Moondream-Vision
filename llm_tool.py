@@ -67,3 +67,59 @@ def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, 
         "answer": text,
         "monitor_index": int(cfg.monitor_index),
     }
+
+
+@tool(
+    name="moondream_ocr_screen",
+    description=(
+        "Extract all visible text from the given monitor using Chinese OCR (RapidOCR) "
+        "or Moondream2 as fallback. "
+        "Returns the exact on-screen text, preserving line breaks. "
+        "Use when the user needs to read text from the screen (error messages, code, documents, web pages). "
+        "Optional monitor_index: mss monitor index; default -1 uses the plugin setting."
+    ),
+)
+def moondream_ocr_screen(monitor_index: int = -1) -> dict[str, Any]:
+    """OCR extraction from a fresh screenshot — prefers RapidOCR for Chinese accuracy."""
+    try:
+        from plugins.moondream_vision.capture_infer import grab_screen_png
+        from plugins.moondream_vision.config_model import load_config
+        from plugins.moondream_vision.local_infer import ocr_screen_png
+        from plugins.moondream_vision import runtime
+    except ImportError as e:
+        return {"error": f"Moondream 插件依赖未就绪: {e}"}
+
+    try:
+        cfg_path = runtime.plugin_config_path()
+    except RuntimeError:
+        return {
+            "error": "Moondream 尚未完成初始化。请先启动主程序并确保 Moondream 识屏插件已加载。",
+        }
+
+    cfg = load_config(cfg_path)
+    mi = int(monitor_index)
+    if mi >= 0:
+        cfg.monitor_index = mi
+    cfg.clamp()
+
+    try:
+        from plugins.moondream_vision.ui_busy import moondream_busy
+
+        with moondream_busy():
+            png = grab_screen_png(cfg.monitor_index)
+            try:
+                from plugins.moondream_vision.chinese_ocr import ocr_png_bytes
+                text = ocr_png_bytes(png)
+                engine = "rapidocr"
+            except (ImportError, RuntimeError):
+                text = ocr_screen_png(png, cfg)
+                engine = "moondream"
+    except Exception as e:
+        logger.exception("moondream_ocr_screen 推理失败")
+        return {"error": str(e)}
+
+    return {
+        "text": text,
+        "monitor_index": int(cfg.monitor_index),
+        "engine": engine,
+    }

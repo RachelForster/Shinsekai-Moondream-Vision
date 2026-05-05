@@ -628,6 +628,19 @@ def _infer_screen_png_worker(
     return str(out)[:4000]
 
 
+_OCR_PROMPT = (
+    "Read all visible text in this screenshot. "
+    "Output only the exact text, preserving line breaks. "
+    "If there is no text, reply with an empty string. "
+    "Do not describe the image or add commentary."
+)
+
+
+def ocr_screen_png(png: bytes, cfg: MoondreamVisionConfig) -> str:
+    """OCR-only shortcut: reuses the same Moondream model with a text-extraction prompt."""
+    return infer_screen_png(png, _OCR_PROMPT, cfg)
+
+
 def infer_screen_png(png: bytes, question: str, cfg: MoondreamVisionConfig) -> str:
     """将加载与推理派发到单线程池，调用方线程（含 UI / QThread）仅等待结果。"""
     ex = _ensure_infer_executor()
