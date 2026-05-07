@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sdk.logging.timing import tracker
 from sdk.tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -56,9 +57,10 @@ def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, 
     try:
         from plugins.moondream_vision.ui_busy import moondream_busy
 
-        with moondream_busy():
-            png = grab_screen_png(cfg.monitor_index)
-            text = infer_screen_png(png, q, cfg)
+        with moondream_busy(ok_message="Moondream: 识屏完成"):
+            with tracker.track("moondream query_screen"):
+                png = grab_screen_png(cfg.monitor_index)
+                text = infer_screen_png(png, q, cfg)
     except Exception as e:
         logger.exception("moondream_query_screen 推理失败")
         return {"error": str(e)}
@@ -105,15 +107,16 @@ def moondream_ocr_screen(monitor_index: int = -1) -> dict[str, Any]:
     try:
         from plugins.moondream_vision.ui_busy import moondream_busy
 
-        with moondream_busy():
-            png = grab_screen_png(cfg.monitor_index)
-            try:
-                from plugins.moondream_vision.chinese_ocr import ocr_png_bytes
-                text = ocr_png_bytes(png)
-                engine = "rapidocr"
-            except (ImportError, RuntimeError):
-                text = ocr_screen_png(png, cfg)
-                engine = "moondream"
+        with moondream_busy(ok_message="Moondream: 识屏完成"):
+            with tracker.track("moondream ocr_screen"):
+                png = grab_screen_png(cfg.monitor_index)
+                try:
+                    from plugins.moondream_vision.chinese_ocr import ocr_png_bytes
+                    text = ocr_png_bytes(png)
+                    engine = "rapidocr"
+                except (ImportError, RuntimeError):
+                    text = ocr_screen_png(png, cfg)
+                    engine = "moondream"
     except Exception as e:
         logger.exception("moondream_ocr_screen 推理失败")
         return {"error": str(e)}

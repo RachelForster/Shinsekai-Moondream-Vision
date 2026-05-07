@@ -34,10 +34,15 @@ def _hide_busy() -> None:
 
 
 @contextmanager
-def moondream_busy(message: str | None = None) -> Iterator[None]:
-    """在 with 块期间显示 BusyBar（duration<=0 直到退出 with）。"""
+def moondream_busy(message: str | None = None, *, ok_message: str = "") -> Iterator[None]:
+    """在 with 块期间显示 BusyBar，退出时短暂显示结果。"""
     _post_busy(message if (message or "").strip() else _DEFAULT_MESSAGE, 0.0)
     try:
         yield
-    finally:
-        _hide_busy()
+        if ok_message.strip():
+            _post_busy(ok_message.strip(), 2.5)
+        else:
+            _hide_busy()
+    except Exception:
+        _post_busy("Moondream: 识屏失败", 4.0)
+        raise

@@ -498,6 +498,10 @@ def get_model(cfg: MoondreamVisionConfig) -> Any:
             fp_kw["cache_dir"] = cache_dir
 
         _demote_hf_http_loggers_once()
+
+        from plugins.moondream_vision.ui_busy import _post_busy
+
+        _post_busy("Moondream: 正在加载模型（首次需下载，请稍候）…", 0.0)
         logger.info("Moondream 正在加载模型 %s（如需下载请稍候）…", mid)
         _push_torch_module_all_tied_weights_keys_compat()
         try:
@@ -524,6 +528,7 @@ def get_model(cfg: MoondreamVisionConfig) -> Any:
             )
         _model_key = key
         logger.info("Moondream 模型已就绪。")
+        _post_busy("Moondream: reading screen…", 0.0)
         return _model
 
 
@@ -674,3 +679,13 @@ def unload_model() -> None:
             logger.exception("Moondream: 提交释放权重任务失败或超时")
     else:
         _release_weights_sync()
+
+
+def shutdown() -> None:
+    """释放模型权重并关闭推理线程池。"""
+    global _infer_executor
+    unload_model()
+    with _infer_exec_lock:
+        if _infer_executor is not None:
+            _infer_executor.shutdown(wait=False)
+            _infer_executor = None

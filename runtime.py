@@ -6,12 +6,14 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from sdk.logging.timing import tracker
+
 from plugins.moondream_vision.capture_infer import grab_screen_png, grab_screen_thumbnail
 from plugins.moondream_vision.config_model import (
     default_config_path,
     load_config,
 )
-from plugins.moondream_vision.local_infer import infer_screen_png, unload_model
+from plugins.moondream_vision.local_infer import infer_screen_png, shutdown as moondream_shutdown
 from plugins.moondream_vision.prompts import question_for_triggers
 from plugins.moondream_vision.trigger_state import MoondreamTriggerState
 from plugins.moondream_vision.ui_busy import moondream_busy
@@ -53,7 +55,7 @@ def bind_emit(emit: Callable[[str], None]) -> None:
 
 def shutdown() -> None:
     _stop_worker()
-    unload_model()
+    moondream_shutdown()
 
 
 def _stop_worker() -> None:
@@ -111,10 +113,11 @@ def _restart_worker() -> None:
                 if now - last_infer_monotonic < float(c.interval_sec):
                     continue
 
-                with moondream_busy():
-                    png = grab_screen_png(c.monitor_index)
-                    q = question_for_triggers(c, reasons)
-                    text = infer_screen_png(png, q, c)
+                with moondream_busy(ok_message="Moondream: 识屏完成"):
+                    with tracker.track("moondream capture+infer"):
+                        png = grab_screen_png(c.monitor_index)
+                        q = question_for_triggers(c, reasons)
+                        text = infer_screen_png(png, q, c)
                     msg = f"{c.message_prefix}{text}".strip()
                     if msg:
                         emit(msg)
