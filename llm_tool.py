@@ -15,6 +15,7 @@ from sdk.tool_registry import tool
 
 logger = logging.getLogger(__name__)
 
+VISION_TOOL_GROUP = "vision"
 
 @tool(
     name="moondream_query_screen",
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
         "Pass question: a clear instruction in English, e.g. 'What error text is shown in the dialog?' "
         "Optional monitor_index: mss monitor index; default -1 uses the plugin setting; 0 = virtual full desktop, 1 = primary."
     ),
+    group=VISION_TOOL_GROUP,
 )
 def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, Any]:
     """
@@ -80,6 +82,7 @@ def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, 
         "Use when the user needs to read text from the screen (error messages, code, documents, web pages). "
         "Optional monitor_index: mss monitor index; default -1 uses the plugin setting."
     ),
+    group=VISION_TOOL_GROUP,
 )
 def moondream_ocr_screen(monitor_index: int = -1) -> dict[str, Any]:
     """OCR extraction from a fresh screenshot — prefers RapidOCR for Chinese accuracy."""
