@@ -92,6 +92,8 @@ def _demote_hf_http_loggers_once() -> None:
 _model: Any = None
 _model_key: tuple[str, str, str, str, str, str] | None = None
 _lock = threading.Lock()
+_model_loading = False
+_loading_started_at: float = 0.0
 
 # 所有 load + infer 仅在此时上执行，避免占用 Qt 主线程或 LLMWorker 的 QThread。
 _infer_executor: ThreadPoolExecutor | None = None
@@ -530,6 +532,70 @@ def get_model(cfg: MoondreamVisionConfig) -> Any:
         logger.info("Moondream 模型已就绪。")
         _post_busy("Moondream: reading screen…", 0.0)
         return _model
+
+
+def is_tool_ready() -> bool:
+    """模型是否已加载完毕，可在不阻塞的情况下推理。"""
+    return _model is not None
+
+
+def loading_status_message() -> str:
+    """动态生成模型加载状态消息，包含已等待时长。"""
+    if _loading_started_at > 0:
+        elapsed = int(time.time() - _loading_started_at)
+        if elapsed < 60:
+            return (
+                f"Moondream 视觉模型仍在加载中（已等待 {elapsed} 秒），"
+                "首次需从 HuggingFace 下载模型约 2-10 分钟。"
+                "请直接告诉用户「视觉模型正在加载，请稍等几分钟」，不要重复调用本工具或任何 moondream_* 工具。"
+            )
+        else:
+            minutes = elapsed // 60
+            seconds = elapsed % 60
+            return (
+                f"Moondream 视觉模型仍在加载中（已等待 {minutes} 分 {seconds} 秒），"
+                "仍在下载/加载模型到显存。请告诉用户再等 1-3 分钟，不要重复调用本工具。"
+            )
+    return (
+        "Moondream 视觉模型正在后台加载（首次需从 HuggingFace 下载，约 2-10 分钟）。"
+        "请直接告诉用户「视觉模型正在初始化，请稍等几分钟」，不要重复调用本工具或任何 moondream_* 工具。"
+    )
+
+
+def start_preload_model(cfg: MoondreamVisionConfig) -> None:
+    """在后台线程启动模型加载，不阻塞调用方。已加载或正在加载时无操作。"""
+    global _model_loading, _loading_started_at
+    with _lock:
+        if _model is not None or _model_loading:
+            return
+        _model_loading = True
+        _loading_started_at = time.time()
+
+    def _load() -> None:
+        global _model_loading
+        try:
+            cfg_id = cfg.model_id if cfg else "unknown"
+            print(f"[moondream] 后台线程开始加载模型 {cfg_id}…")
+            get_model(cfg)
+            print("[moondream] 后台加载完成，视觉模型已就绪")
+        except Exception:
+            print("[moondream] 后台加载失败！详见日志")
+            logger.exception("Moondream 后台预加载失败")
+        else:
+            # 加载成功 → 通知宿主清除冷却 + 推送聊天通知
+            try:
+                from sdk.tool_registry import notify_tool_ready
+                notify_tool_ready("vision", "视觉模型已就绪，可以使用识屏功能了。")
+            except Exception:
+                logger.exception("moondream 就绪通知失败")
+        finally:
+            with _lock:
+                _model_loading = False
+
+    print("[moondream] 启动后台加载线程…")
+    t = threading.Thread(target=_load, name="moondream-preloader", daemon=True)
+    t.start()
+    logger.info("Moondream 后台预加载线程已启动")
 
 
 def _maybe_downscale_infer_image(
