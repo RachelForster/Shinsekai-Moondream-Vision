@@ -16,6 +16,56 @@ from plugins.moondream_vision.config_model import (
 from plugins.moondream_vision.local_infer import infer_screen_png, shutdown as moondream_shutdown
 from plugins.moondream_vision.prompts import question_for_triggers
 from plugins.moondream_vision.trigger_state import MoondreamTriggerState
+
+
+def _mask_chat_window(png: bytes) -> bytes:
+    """涂黑 Shinsekai 聊天窗口区域，避免模型看到自己的立绘。"""
+    import io
+    import sys
+    from PIL import Image, ImageDraw
+
+    image = Image.open(io.BytesIO(png)).convert("RGB")
+    if sys.platform != "win32":
+        return png
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        found = None
+
+        def _enum(hwnd, _lparam):
+            nonlocal found
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value
+            if title and any(kw in title for kw in ("Shinsekai", "新世界", "桌面助手", "Chat")):
+                r = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(r))
+                if r.right - r.left > 100 and r.bottom - r.top > 100:
+                    found = (r.left, r.top, r.right, r.bottom)
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows(WNDENUMPROC(_enum), 0)
+
+        if found:
+            x1, y1, x2, y2 = found
+            margin = 10
+            draw = ImageDraw.Draw(image)
+            draw.rectangle(
+                [x1 - margin, y1 - margin, x2 + margin, y2 + margin],
+                fill=(0, 0, 0),
+            )
+    except Exception:
+        pass
+
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
 from plugins.moondream_vision.ui_busy import moondream_busy
 
 logger = logging.getLogger(__name__)
@@ -116,7 +166,9 @@ def _restart_worker() -> None:
                 with moondream_busy(ok_message="Moondream: 识屏完成"):
                     with tracker.track("moondream capture+infer"):
                         png = grab_screen_png(c.monitor_index)
+                        png = _mask_chat_window(png)
                         q = question_for_triggers(c, reasons)
+                        q = q + " The black rectangle on screen is your own chat window. Do NOT describe or react to it — it is you."
                         text = infer_screen_png(png, q, c)
                     msg = f"{c.message_prefix}{text}".strip()
                     if msg:

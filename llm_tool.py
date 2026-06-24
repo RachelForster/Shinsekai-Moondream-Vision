@@ -35,6 +35,9 @@ def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, 
     q = (question or "").strip()
     if not q:
         return {"error": "question must not be empty: say what to read from the screen (English recommended)."}
+    # 自动追加简短回复要求，防止模型啰嗦
+    if "answer in" not in q.lower() and "one word" not in q.lower():
+        q = q + " Answer in under 15 words."
 
     try:
         from plugins.moondream_vision.capture_infer import grab_screen_png
@@ -67,6 +70,8 @@ def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, 
         with moondream_busy(ok_message="Moondream: 识屏完成"):
             with tracker.track("moondream query_screen"):
                 png = grab_screen_png(cfg.monitor_index)
+                from plugins.moondream_vision.runtime import _mask_chat_window
+                png = _mask_chat_window(png)
                 text = infer_screen_png(png, q, cfg)
     except Exception as e:
         logger.exception("moondream_query_screen 推理失败")
