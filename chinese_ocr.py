@@ -50,3 +50,23 @@ def ocr_png_bytes(png: bytes) -> str:
     """对 PNG 字节数据做中文 OCR。"""
     image = Image.open(io.BytesIO(png)).convert("RGB")
     return ocr_image(image)
+
+
+def ocr_image_with_boxes(image) -> list[dict]:
+    """对 PIL Image 做中文 OCR，返回文字 + 包围盒列表。
+
+    每个元素: {"text": str, "box": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]}
+    box 为 RapidOCR 返回的四个角点，坐标相对于图片像素。
+    供 mouse_control 等插件进行文字定位点击。
+    """
+    engine = _get_ocr()
+    result, _ = engine(image)
+    if not result:
+        return []
+    items: list[dict] = []
+    for (_box, text, _conf) in result:
+        t = str(text).strip()
+        if t:
+            box_list = _box.tolist() if hasattr(_box, "tolist") else list(_box)
+            items.append({"text": t, "box": box_list})
+    return items
