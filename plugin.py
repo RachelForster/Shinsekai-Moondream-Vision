@@ -45,7 +45,7 @@ class MoondreamVisionPlugin(PluginBase):
 
     @property
     def plugin_version(self) -> str:
-        return "0.2.0"
+        return "0.3.0"
 
     @property
     def priority(self) -> int:
