@@ -13,7 +13,7 @@ from plugins.moondream_vision.config_model import (
     default_config_path,
     load_config,
 )
-from plugins.moondream_vision.local_infer import infer_screen_png, shutdown as moondream_shutdown
+from plugins.moondream_vision.screen_infer import infer_screen_png, shutdown as vision_shutdown
 from plugins.moondream_vision.prompts import question_for_triggers
 from plugins.moondream_vision.trigger_state import MoondreamTriggerState
 from plugins.moondream_vision.ui_busy import moondream_busy
@@ -55,7 +55,7 @@ def bind_emit(emit: Callable[[str], None]) -> None:
 
 def shutdown() -> None:
     _stop_worker()
-    moondream_shutdown()
+    vision_shutdown()
 
 
 def _stop_worker() -> None:
@@ -113,8 +113,8 @@ def _restart_worker() -> None:
                 if now - last_infer_monotonic < float(c.interval_sec):
                     continue
 
-                with moondream_busy(ok_message="Moondream: 识屏完成"):
-                    with tracker.track("moondream capture+infer"):
+                with moondream_busy(ok_message="识屏完成"):
+                    with tracker.track("vision capture+infer"):
                         png = grab_screen_png(c.monitor_index)
                         q = question_for_triggers(c, reasons)
                         text = infer_screen_png(png, q, c)
@@ -124,11 +124,11 @@ def _restart_worker() -> None:
                     state.on_infer_done(thumb)
                     last_infer_monotonic = time.monotonic()
                 logger.info(
-                    "Moondream 已触发识屏（%s）",
+                    "已触发识屏（%s）",
                     ",".join(reasons) if reasons else "?",
                 )
             except Exception:
-                logger.exception("Moondream 屏幕识别轮询失败")
+                logger.exception("屏幕识别轮询失败")
 
     global _worker_thread, _stop_event
     with _lock:

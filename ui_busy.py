@@ -8,7 +8,7 @@ from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MESSAGE = "Moondream: reading screen…"
+_DEFAULT_MESSAGE = "Reading screen…"
 
 
 def _post_busy(text: str, duration_seconds: float = 0.0) -> None:
@@ -44,5 +44,5 @@ def moondream_busy(message: str | None = None, *, ok_message: str = "") -> Itera
         else:
             _hide_busy()
     except Exception:
-        _post_busy("Moondream: 识屏失败", 4.0)
+        _post_busy("识屏失败", 4.0)
         raise

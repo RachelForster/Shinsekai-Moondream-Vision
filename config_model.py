@@ -8,6 +8,8 @@ from pathlib import Path
 @dataclass
 class MoondreamVisionConfig:
     enabled: bool = False
+    adapter: str = "vision"
+    """vision 使用宿主 AI 服务中的视觉适配器；moondream 使用插件本地模型。"""
     model_id: str = "vikhyatk/moondream2"
     """Hugging Face 模型 ID；首次推理时下载到本地缓存。"""
     revision: str = ""
@@ -39,6 +41,8 @@ class MoondreamVisionConfig:
     message_prefix: str = "[Screen] "
 
     def clamp(self) -> None:
+        adapter = str(self.adapter or "vision").strip().lower()
+        self.adapter = adapter if adapter in ("vision", "moondream") else "vision"
         self.motion_poll_sec = max(0.12, min(3.0, float(self.motion_poll_sec)))
         self.diff_threshold = max(0.003, min(0.35, float(self.diff_threshold)))
         self.mouse_move_percent = max(0.02, min(25.0, float(self.mouse_move_percent)))
@@ -78,6 +82,7 @@ def load_config(path: Path) -> MoondreamVisionConfig:
             return MoondreamVisionConfig()
         c = MoondreamVisionConfig(
             enabled=bool(raw.get("enabled", False)),
+            adapter=str(raw.get("adapter") or "vision"),
             model_id=str(raw.get("model_id", "vikhyatk/moondream2") or "vikhyatk/moondream2"),
             revision=str(raw.get("revision", "") or ""),
             cache_dir=str(raw.get("cache_dir", "") or ""),

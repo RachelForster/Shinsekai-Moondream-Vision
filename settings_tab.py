@@ -29,7 +29,7 @@ from sdk.plugin_host_context import PluginSettingsUIContext
 
 
 class MoondreamVisionSettingsTab(QWidget):
-    """设置 → 小工具：本地 Moondream2（Transformers）截屏识别。"""
+    """设置 → 小工具：使用视觉适配器或本地 Moondream 识屏。"""
 
     def __init__(
         self, plg: PluginSettingsUIContext, plugin_root: Path, parent: QWidget | None = None
@@ -44,33 +44,41 @@ class MoondreamVisionSettingsTab(QWidget):
     def _build(self) -> None:
         lay = QVBoxLayout(self)
         hint = QLabel(
-            "使用 mss 截屏，通过 Hugging Face Transformers 加载本地缓存的 Moondream2（vikhyatk/moondream2），"
+            "使用 mss 截屏，默认通过「AI 服务」中配置的视觉适配器识别屏幕。"
             "满足「屏幕相对上次识别有明显变化 / 鼠标移动 / （Windows）新开或切换前台窗口」时才会截屏送模型；"
             "并受下方「最短推理间隔」限制，避免过于频繁。\n\n"
             "自动识屏时按触发类型使用英文内置提示词（可在下方逐项覆盖）；多条件同时满足时优先级为："
-            "屏幕差分 > 前台切换 > 新窗口 > 鼠标移动。\n\n"
-            "请先安装插件依赖：\n，如果你要用gpu加速，请先安装和你cuda版本对应的torch和bitsandbytes，比如cuda12.4对应torch2.1.0和bitsandbytes0.43.1"
-            "pip install -r plugins/moondream_vision/requirements.txt\n\n"
-            "首次启用后首次推理会从网络下载模型到 HF 缓存（可填「缓存目录」重定向）。\n\n"
-            "INT8 / INT4：使用 bitsandbytes，需 NVIDIA GPU + CUDA；INT4 为 NF4 方案。比较快速但准确率下降一丢丢\n\n"
-            "LLM 工具 moondream_query_screen 与自动识屏共用同一模型；加载完成后若长时间无新日志，多半是在跑 query（大屏+CPU 会更久）。"
+            "屏幕差分 > 前台切换 > 新窗口 > 鼠标移动。"
         )
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
-        box = QGroupBox("Moondream 本地识屏")
+        box = QGroupBox("屏幕识别")
         fl = QFormLayout(box)
         self._enabled = QCheckBox("启用识屏（差分 / 鼠标 / 系统窗口事件触发）")
         fl.addRow(self._enabled)
+        self._adapter = QComboBox()
+        self._adapter.addItem("Vision adapter（AI 服务设置）", "vision")
+        self._adapter.addItem("Moondream（本地）", "moondream")
+        self._adapter.currentIndexChanged.connect(self._update_adapter_visibility)
+        fl.addRow("适配器:", self._adapter)
+        self._local_model_box = QGroupBox("Moondream 本地模型")
+        model_fl = QFormLayout(self._local_model_box)
+        local_hint = QLabel(
+            "首次使用会下载模型到 Hugging Face 缓存。请先安装本地模型依赖；"
+            "INT8 / INT4 需要 NVIDIA CUDA 和 bitsandbytes。"
+        )
+        local_hint.setWordWrap(True)
+        model_fl.addRow(local_hint)
         self._model_id = QLineEdit()
         self._model_id.setPlaceholderText("vikhyatk/moondream2")
-        fl.addRow("模型 ID:", self._model_id)
+        model_fl.addRow("模型 ID:", self._model_id)
         self._revision = QLineEdit()
         self._revision.setPlaceholderText("可选，如 2025-01-09")
-        fl.addRow("修订 revision:", self._revision)
+        model_fl.addRow("修订 revision:", self._revision)
         self._cache_dir = QLineEdit()
         self._cache_dir.setPlaceholderText("可选；留空用系统默认 HF 缓存")
-        fl.addRow("缓存目录:", self._cache_dir)
+        model_fl.addRow("缓存目录:", self._cache_dir)
         self._device = QComboBox()
         for label, data in (
             ("自动", "auto"),
@@ -79,7 +87,7 @@ class MoondreamVisionSettingsTab(QWidget):
             ("CPU", "cpu"),
         ):
             self._device.addItem(label, data)
-        fl.addRow("设备:", self._device)
+        model_fl.addRow("设备:", self._device)
         self._quantization = QComboBox()
         for label, data in (
             ("无（浮点）", "none"),
@@ -91,7 +99,8 @@ class MoondreamVisionSettingsTab(QWidget):
             "INT8 / INT4 需 NVIDIA CUDA 与 bitsandbytes；与 Apple MPS / 纯 CPU 不兼容。"
             "视觉塔 vision 不参与量化（仍为 FP），以兼容 Moondream 自定义前向；仅语言部分减压显存。"
         )
-        fl.addRow("权重量化:", self._quantization)
+        model_fl.addRow("权重量化:", self._quantization)
+        fl.addRow(self._local_model_box)
         self._motion_poll = QDoubleSpinBox()
         self._motion_poll.setRange(0.12, 3.0)
         self._motion_poll.setSingleStep(0.05)
@@ -197,6 +206,8 @@ class MoondreamVisionSettingsTab(QWidget):
     def _load_into_ui(self) -> None:
         c = load_config(self._path)
         self._enabled.setChecked(c.enabled)
+        self._adapter.setCurrentIndex(max(0, self._adapter.findData(c.adapter)))
+        self._update_adapter_visibility()
         self._model_id.setText(c.model_id)
         self._revision.setText(c.revision)
         self._cache_dir.setText(c.cache_dir)
@@ -218,6 +229,7 @@ class MoondreamVisionSettingsTab(QWidget):
     def _read_from_ui(self) -> MoondreamVisionConfig:
         c = MoondreamVisionConfig(
             enabled=self._enabled.isChecked(),
+            adapter=str(self._adapter.currentData() or "vision"),
             model_id=self._model_id.text().strip() or "vikhyatk/moondream2",
             revision=self._revision.text().strip(),
             cache_dir=self._cache_dir.text().strip(),
@@ -239,11 +251,14 @@ class MoondreamVisionSettingsTab(QWidget):
         c.clamp()
         return c
 
+    def _update_adapter_visibility(self) -> None:
+        self._local_model_box.setVisible(self._adapter.currentData() == "moondream")
+
     def _on_save(self) -> None:
         c = self._read_from_ui()
         save_config(self._path, c)
         QMessageBox.information(
             self,
-            "Moondream",
-            "已保存。修改模型 ID、设备、量化、缓存目录后，建议重启聊天主程序以重新加载权重。",
+            "屏幕识别",
+            "已保存，下次截屏时生效。",
         )

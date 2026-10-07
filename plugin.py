@@ -37,7 +37,7 @@ def _int_value(values: Mapping[str, object], key: str, default: int) -> int:
 
 
 class MoondreamVisionPlugin(PluginBase):
-    """Capture screen context with Moondream and submit it as chat input."""
+    """Capture screen context with the configured vision backend as chat input."""
 
     @property
     def plugin_id(self) -> str:
@@ -45,7 +45,7 @@ class MoondreamVisionPlugin(PluginBase):
 
     @property
     def plugin_version(self) -> str:
-        return "0.1.0"
+        return "0.2.0"
 
     @property
     def priority(self) -> int:
@@ -81,13 +81,13 @@ class MoondreamVisionPlugin(PluginBase):
                 title="Moondream Vision",
                 kind="tools",
                 description=(
-                    "Use local screen captures and Moondream to turn screen activity "
+                    "Use screen captures and the AI Service vision adapter to turn screen activity "
                     "into chat input."
                 ),
-                restart_hint="Restart chat after changing model, device, quantization, or cache settings.",
+                restart_hint="Settings apply to the next screen capture.",
                 schema=[
                     {
-                        "description": "Model loading may download weights on first use.",
+                        "description": "Vision adapter follows the visual service configured in AI Service settings.",
                         "fields": [
                             {
                                 "defaultValue": False,
@@ -97,11 +97,22 @@ class MoondreamVisionPlugin(PluginBase):
                                 "type": "boolean",
                             },
                             {
+                                "defaultValue": "vision",
+                                "key": "adapter",
+                                "label": "Adapter",
+                                "options": [
+                                    {"label": "Vision adapter (AI Service settings)", "value": "vision"},
+                                    {"label": "Moondream (local)", "value": "moondream"},
+                                ],
+                                "type": "select",
+                            },
+                            {
                                 "defaultValue": "vikhyatk/moondream2",
                                 "key": "model_id",
                                 "label": "Model ID",
                                 "placeholder": "vikhyatk/moondream2",
                                 "type": "text",
+                                "visibleWhen": {"adapter": "moondream"},
                             },
                             {
                                 "defaultValue": "",
@@ -109,6 +120,7 @@ class MoondreamVisionPlugin(PluginBase):
                                 "label": "Revision",
                                 "placeholder": "Optional model revision",
                                 "type": "text",
+                                "visibleWhen": {"adapter": "moondream"},
                             },
                             {
                                 "defaultValue": "",
@@ -117,6 +129,7 @@ class MoondreamVisionPlugin(PluginBase):
                                 "placeholder": "Leave empty for the default Hugging Face cache",
                                 "span": "full",
                                 "type": "text",
+                                "visibleWhen": {"adapter": "moondream"},
                             },
                             {
                                 "defaultValue": "auto",
@@ -129,6 +142,7 @@ class MoondreamVisionPlugin(PluginBase):
                                     {"label": "CPU", "value": "cpu"},
                                 ],
                                 "type": "select",
+                                "visibleWhen": {"adapter": "moondream"},
                             },
                             {
                                 "defaultValue": "none",
@@ -141,10 +155,11 @@ class MoondreamVisionPlugin(PluginBase):
                                     {"label": "INT4", "value": "int4"},
                                 ],
                                 "type": "select",
+                                "visibleWhen": {"adapter": "moondream"},
                             },
                         ],
                         "id": "model",
-                        "title": "Model",
+                        "title": "Screen understanding",
                     },
                     {
                         "fields": [
@@ -273,6 +288,7 @@ class MoondreamVisionPlugin(PluginBase):
     def _save_frontend_config(self, plugin_root: Path, values: Mapping[str, object]) -> None:
         cfg = MoondreamVisionConfig(
             enabled=bool(values.get("enabled", False)),
+            adapter=str(values.get("adapter") or "vision"),
             model_id=str(values.get("model_id") or "vikhyatk/moondream2").strip() or "vikhyatk/moondream2",
             revision=str(values.get("revision") or "").strip(),
             cache_dir=str(values.get("cache_dir") or "").strip(),

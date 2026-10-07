@@ -20,11 +20,12 @@ VISION_TOOL_GROUP = "vision"
 @tool(
     name="moondream_query_screen",
     description=(
-        "Capture the given monitor and answer your question using the local Moondream2 vision model. "
+        "Capture the given monitor and answer your question using the configured vision adapter. "
         "Use when the user needs on-screen facts (UI text, errors, URLs, window contents). "
         "Pass question: a clear instruction in English, e.g. 'What error text is shown in the dialog?' "
         "Optional monitor_index: mss monitor index; default -1 uses the plugin setting; 0 = virtual full desktop, 1 = primary. "
-        "NOTE: first call may trigger model download/load (2-10 min). If you get status:'loading', follow the message instruction and tell the user — do NOT retry this tool or any moondream_* tool."
+        "When the local Moondream backend is selected, the first call may download/load weights. "
+        "If you get status:'loading', follow the message instruction and tell the user — do NOT retry this tool or any moondream_* tool."
     ),
     group=VISION_TOOL_GROUP,
 )
@@ -39,16 +40,16 @@ def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, 
     try:
         from plugins.moondream_vision.capture_infer import grab_screen_png
         from plugins.moondream_vision.config_model import load_config
-        from plugins.moondream_vision.local_infer import infer_screen_png, is_tool_ready, start_preload_model, loading_status_message
+        from plugins.moondream_vision.screen_infer import infer_screen_png, prepare_tool
         from plugins.moondream_vision import runtime
     except ImportError as e:
-        return {"error": f"Moondream 插件依赖未就绪: {e}"}
+        return {"error": f"读屏插件依赖未就绪: {e}"}
 
     try:
         cfg_path = runtime.plugin_config_path()
     except RuntimeError:
         return {
-            "error": "Moondream 尚未完成初始化。请先启动主程序并确保 Moondream 识屏插件已加载。",
+            "error": "读屏插件尚未完成初始化。请先启动主程序并确保识屏插件已加载。",
         }
 
     cfg = load_config(cfg_path)
@@ -57,14 +58,12 @@ def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, 
         cfg.monitor_index = mi
     cfg.clamp()
 
-    if not is_tool_ready():
-        start_preload_model(cfg)
-        raise ToolNotReady(loading_status_message())
+    prepare_tool(cfg)
 
     try:
         from plugins.moondream_vision.ui_busy import moondream_busy
 
-        with moondream_busy(ok_message="Moondream: 识屏完成"):
+        with moondream_busy(ok_message="识屏完成"):
             with tracker.track("moondream query_screen"):
                 png = grab_screen_png(cfg.monitor_index)
                 text = infer_screen_png(png, q, cfg)
@@ -82,7 +81,7 @@ def moondream_query_screen(question: str, monitor_index: int = -1) -> dict[str, 
     name="moondream_ocr_screen",
     description=(
         "Extract all visible text from the given monitor using Chinese OCR (RapidOCR) "
-        "or Moondream2 as fallback. "
+        "or the configured vision adapter as fallback. "
         "Returns the exact on-screen text, preserving line breaks. "
         "Use when the user needs to read text from the screen (error messages, code, documents, web pages). "
         "Optional monitor_index: mss monitor index; default -1 uses the plugin setting. "
@@ -95,16 +94,16 @@ def moondream_ocr_screen(monitor_index: int = -1) -> dict[str, Any]:
     try:
         from plugins.moondream_vision.capture_infer import grab_screen_png
         from plugins.moondream_vision.config_model import load_config
-        from plugins.moondream_vision.local_infer import ocr_screen_png, is_tool_ready, start_preload_model, loading_status_message
+        from plugins.moondream_vision.screen_infer import ocr_screen_png
         from plugins.moondream_vision import runtime
     except ImportError as e:
-        return {"error": f"Moondream 插件依赖未就绪: {e}"}
+        return {"error": f"读屏插件依赖未就绪: {e}"}
 
     try:
         cfg_path = runtime.plugin_config_path()
     except RuntimeError:
         return {
-            "error": "Moondream 尚未完成初始化。请先启动主程序并确保 Moondream 识屏插件已加载。",
+            "error": "读屏插件尚未完成初始化。请先启动主程序并确保识屏插件已加载。",
         }
 
     cfg = load_config(cfg_path)
@@ -113,23 +112,15 @@ def moondream_ocr_screen(monitor_index: int = -1) -> dict[str, Any]:
         cfg.monitor_index = mi
     cfg.clamp()
 
-    if not is_tool_ready():
-        start_preload_model(cfg)
-        raise ToolNotReady(loading_status_message())
-
     try:
         from plugins.moondream_vision.ui_busy import moondream_busy
 
-        with moondream_busy(ok_message="Moondream: 识屏完成"):
+        with moondream_busy(ok_message="识屏完成"):
             with tracker.track("moondream ocr_screen"):
                 png = grab_screen_png(cfg.monitor_index)
-                try:
-                    from plugins.moondream_vision.chinese_ocr import ocr_png_bytes
-                    text = ocr_png_bytes(png)
-                    engine = "rapidocr"
-                except (ImportError, RuntimeError):
-                    text = ocr_screen_png(png, cfg)
-                    engine = "moondream"
+                text, engine = ocr_screen_png(png, cfg)
+    except ToolNotReady:
+        raise
     except Exception as e:
         logger.exception("moondream_ocr_screen 推理失败")
         return {"error": str(e)}
